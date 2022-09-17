@@ -19,6 +19,15 @@ const P: f64 = 0.05;
 const DURATION_TIME: Duration = Duration::from_millis(75);
 const CHARS_MIN_LEN: usize = 10;
 
+macro_rules! recv {
+    ($recv:expr, $var:tt, $block:block) => {
+        match $recv.try_recv() {
+            Ok($var) => $block,
+            Err(_) => {},
+        }
+    };
+}
+
 #[derive(Debug, Clone)]
 struct Rain {
     x: u16,
@@ -201,18 +210,13 @@ impl App {
         self.appchan();
 
         loop {
-            // TODO: write a macro to make this smaller.
-            match self.keychan.key_recv.try_recv() {
-                Ok(_) => break,
-                Err(_) => {}
-            }
-            match self.resizechan.resize_recv.try_recv() {
-                Ok((w, h)) => {
-                    self.h = h as i32;
-                    self.rains = vec![None; w as usize];
-                }
-                Err(_) => {}
-            }
+            recv!(self.keychan.key_recv, _, {break});
+
+            recv!(self.resizechan.resize_recv, (w, h), {
+                self.h = h as i32;
+                self.rains = vec![None; w as usize];
+            });
+
             self.update_rains();
             self.draw();
             thread::sleep(DURATION_TIME);
