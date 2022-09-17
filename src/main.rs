@@ -23,7 +23,7 @@ macro_rules! recv {
     ($recv:expr, $var:tt, $block:block) => {
         match $recv.try_recv() {
             Ok($var) => $block,
-            Err(_) => {},
+            Err(_) => {}
         }
     };
 }
@@ -210,7 +210,7 @@ impl App {
         self.appchan();
 
         loop {
-            recv!(self.keychan.key_recv, _, {break});
+            recv!(self.keychan.key_recv, _, { break });
 
             recv!(self.resizechan.resize_recv, (w, h), {
                 self.h = h as i32;
