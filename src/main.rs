@@ -2,31 +2,19 @@ use crossterm::{
     cursor,
     event::{self, Event},
     execute, queue,
-    style::{self, Color, SetBackgroundColor, SetForegroundColor},
+    style::{self, Color, SetForegroundColor},
     terminal::{self, ClearType},
 };
 use rand::{rngs::ThreadRng, Rng};
 use std::{
     io::{self, Stdout, Write},
-    sync::mpsc::{self, Receiver, Sender},
-    thread,
     time::Duration,
 };
 
 // NOTICE: config
-const SPEED: i32 = 5;
+const SPEED: i32 = 1;
 const P: f64 = 0.05;
-const DURATION_TIME: Duration = Duration::from_millis(75);
 const CHARS_MIN_LEN: usize = 10;
-
-macro_rules! recv {
-    ($recv:expr, $var:tt, $block:block) => {
-        match $recv.try_recv() {
-            Ok($var) => $block,
-            Err(_) => {}
-        }
-    };
-}
 
 #[derive(Debug, Clone)]
 struct Rain {
@@ -45,68 +33,77 @@ impl Rain {
         }
         Self {
             x,
-            y: 0,
+            y: 1,
             chars,
             index: 0,
         }
     }
 
-    fn drop(&mut self, h: i32) {
+    fn drop(&mut self, h: i32) -> bool {
         if self.y + SPEED < h {
             self.y += SPEED;
         } else {
-            self.y = h - 1;
-            self.index += SPEED as usize;
-        }
-    }
-
-    fn draw(&mut self, stdout: &mut Stdout) -> bool {
-        let len = self.chars.len();
-        if self.index >= len {
-            return false;
-        }
-
-        let mut y = self.y as u16;
-        let per_rb: u8 = 255 / self.chars.len() as u8;
-        let mut rb = 255 - (per_rb * self.index as u8);
-        for i in self.index..self.chars.len() {
-            let green = Color::Rgb {
-                r: (rb),
-                g: (255),
-                b: (rb),
-            };
-            rb -= per_rb;
-            queue!(
-                stdout,
-                SetForegroundColor(green),
-                SetBackgroundColor(Color::Rgb {
-                    r: (0),
-                    g: (rb),
-                    b: (0)
-                }),
-                cursor::MoveTo(self.x, y),
-                style::Print(self.chars[i] as char),
-                style::ResetColor,
-            )
-            .unwrap();
-            if y == 0 {
-                break;
+            if self.index >= self.chars.len() {
+                return false;
             }
-            y -= 1;
+            let offset = (SPEED - (h - 1 - self.y)) as usize;
+            self.y = h - 1;
+            self.index += offset;
         }
 
         true
     }
-}
 
-struct KeyChan {
-    key_recv: Receiver<()>,
-    key_send: Sender<()>,
-}
+    fn draw(&mut self, stdout: &mut Stdout) {
+        let len = self.chars.len();
+        if self.index < len {
+            let mut y = self.y as u16;
+            let per_rb: u8 = 255 / self.chars.len() as u8;
+            let mut rb = 255 - (per_rb * self.index as u8);
+            for i in self.index..self.chars.len() {
+                let green = Color::Rgb {
+                    r: (rb),
+                    g: (255),
+                    b: (rb),
+                };
+                rb -= per_rb;
+                queue!(
+                    stdout,
+                    SetForegroundColor(green),
+                    // SetBackgroundColor(Color::Rgb {
+                    //     r: (0),
+                    //     g: (rb),
+                    //     b: (0)
+                    // }),
+                    cursor::MoveTo(self.x, y),
+                    style::Print(self.chars[i] as char),
+                    style::ResetColor,
+                )
+                .unwrap();
+                if y == 0 {
+                    break;
+                }
+                y -= 1;
+            }
+        }
 
-struct ResizeChan {
-    resize_recv: Receiver<(u16, u16)>,
-    resize_send: Sender<(u16, u16)>,
+        // Delete old tail character of rain
+        queue!(stdout, style::ResetColor).unwrap();
+        if self.y as usize >= len {
+            let y = self.y - (std::cmp::max(len, self.index) - self.index) as i32;
+            for i in 0..SPEED {
+                if y - i < 0 {
+                    break;
+                }
+                queue!(
+                    stdout,
+                    cursor::MoveTo(self.x, (y - i) as u16),
+                    style::Print(" ")
+                )
+                .unwrap();
+            }
+        }
+    }
 }
 
 struct App {
@@ -114,27 +111,17 @@ struct App {
     stdout: Stdout,
     rains: Vec<Option<Rain>>,
     random: ThreadRng,
-    keychan: KeyChan,
-    resizechan: ResizeChan,
 }
 
 impl App {
     fn new() -> Self {
         let (w, h) = terminal::size().unwrap();
         let rains = vec![None; w as usize];
-        let (key_send, key_recv): (Sender<()>, Receiver<()>) = mpsc::channel();
-        let (resize_send, resize_recv): (Sender<(u16, u16)>, Receiver<(u16, u16)>) =
-            mpsc::channel();
         Self {
             h: h as i32,
             stdout: io::stdout(),
             rains,
             random: rand::thread_rng(),
-            keychan: KeyChan { key_recv, key_send },
-            resizechan: ResizeChan {
-                resize_recv,
-                resize_send,
-            },
         }
     }
 
@@ -162,64 +149,41 @@ impl App {
         terminal::disable_raw_mode().unwrap();
     }
 
-    fn update_rains(&mut self) {
+    fn draw_update_rains(&mut self) {
         for i in 0..self.rains.len() {
-            match &mut self.rains[i] {
-                Some(rain) => rain.drop(self.h),
-                None => {
-                    if self.random.gen_bool(P) {
-                        self.rains[i] = Some(Rain::new(i as u16, self.h, &mut self.random));
-                    }
+            if let Some(ref mut rain) = self.rains[i] {
+                if rain.drop(self.h) {
+                    rain.draw(&mut self.stdout)
+                } else {
+                    self.rains[i] = None;
                 }
-            }
-        }
-    }
-
-    fn draw(&mut self) {
-        queue!(self.stdout, terminal::Clear(ClearType::All)).unwrap();
-        for i in 0..self.rains.len() {
-            match &mut self.rains[i] {
-                Some(rain) => {
-                    if !rain.draw(&mut self.stdout) {
-                        self.rains[i] = None;
-                    }
+            } else {
+                if self.random.gen_bool(P) {
+                    self.rains[i] = Some(Rain::new(i as u16, self.h, &mut self.random));
                 }
-                None => {}
             }
         }
         self.stdout.flush().unwrap();
     }
 
-    fn appchan(&self) {
-        let key_send = self.keychan.key_send.clone();
-        let resize_send = self.resizechan.resize_send.clone();
-        thread::spawn(move || loop {
-            match event::read() {
-                Ok(Event::Key(_)) => key_send.send(()).unwrap(),
-                Ok(Event::Resize(w, h)) => {
-                    let (rw, rh) = flush_resize_events((w, h));
-                    resize_send.send((rw, rh)).unwrap()
+    fn user_input(&mut self) -> bool {
+        if event::poll(Duration::from_millis(50)).unwrap() {
+            match event::read().unwrap() {
+                Event::Key(_) => return true,
+                Event::Resize(w, h) => {
+                    queue!(self.stdout, terminal::Clear(ClearType::All)).unwrap();
+                    self.h = h as i32;
+                    self.rains = vec![None; w as usize];
                 }
-                Ok(_) => {}
-                Err(_) => {}
+                _ => {}
             }
-        });
+        }
+        false
     }
 
     fn main_loop(&mut self) {
-        self.appchan();
-
-        loop {
-            recv!(self.keychan.key_recv, _, { break });
-
-            recv!(self.resizechan.resize_recv, (w, h), {
-                self.h = h as i32;
-                self.rains = vec![None; w as usize];
-            });
-
-            self.update_rains();
-            self.draw();
-            thread::sleep(DURATION_TIME);
+        while !self.user_input() {
+            self.draw_update_rains();
         }
     }
 }
@@ -229,18 +193,4 @@ fn main() {
     app.init();
     app.main_loop();
     app.clear();
-}
-
-// Resize events can occur in batches.
-// With a simple loop they can be flushed.
-// This function will return last resize event.
-fn flush_resize_events(first_resize: (u16, u16)) -> (u16, u16) {
-    let mut last_resize = first_resize;
-    while let Ok(true) = event::poll(Duration::from_millis(50)) {
-        if let Ok(Event::Resize(x, y)) = event::read() {
-            last_resize = (x, y);
-        }
-    }
-
-    last_resize
 }
